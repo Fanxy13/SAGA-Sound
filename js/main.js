@@ -616,6 +616,7 @@ function openSettings() {
       <label class="set-item">${icon('radio')}<span>Autoplay</span><input type="checkbox" class="switch" data-set="autoplay"${P.autoplay ? ' checked' : ''}></label>
       <button class="set-item" data-set="export">${icon('download')}<span>Backup</span></button>
       <button class="set-item" data-set="import">${icon('upload')}<span>Import</span></button>
+      <a class="set-item" href="https://github.com/Fanxy13" target="_blank" rel="noopener">${icon('github')}<span>GitHub</span><span class="set-sub">@Fanxy13</span>${icon('ext', 'set-ext')}</a>
       <button class="set-item danger" data-set="reset">${icon('trash')}<span>Zurücksetzen</span></button>
     </div>
     <div class="set-foot">${logo(16)}<span>SagaSound</span><span class="dot"></span><a href="https://soundcloud.com" target="_blank" rel="noopener">Powered by SoundCloud</a></div>
@@ -914,12 +915,22 @@ addEventListener('keydown', (e) => {
   pbWave.colors(col);
   npWave.colors(col);
 }
-await Promise.race([initCovers(), new Promise((r) => setTimeout(r, 600))]);
+// Custom covers come from IndexedDB; wait briefly so the first paint already shows them.
+let coversReady = false;
+const coversLoaded = initCovers().then(() => (coversReady = true));
+await Promise.race([coversLoaded, new Promise((r) => setTimeout(r, 600))]);
+const coversLate = !coversReady;
 renderSide();
 renderMe();
 PL.restore();
 onState();
 render();
+if (coversLate) {
+  coversLoaded.then(() => {
+    renderSide();
+    render(true);
+  });
+}
 loadApi().catch(() => {});
 setTimeout(() => {
   SY.maybeResync();

@@ -102,7 +102,7 @@ export function likesCover() {
 
 export function playlistCover(p) {
   const own = coverUrl(p.id);
-  if (own) return `<img class="ld" src="${esc(own)}" alt="" decoding="async">`;
+  if (own) return `<img class="ld" src="${esc(own)}" alt="" decoding="sync">`;
   return (p.art ? img(p.art, 't500x500') : mosaic(p.tracks)) || `<div class="fill" style="background:${gradientFor(p.id)}">${icon('music')}</div>`;
 }
 

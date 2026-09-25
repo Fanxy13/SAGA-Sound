@@ -79,7 +79,7 @@ function tile({ href, title, cover, key }) {
 function tileFor(c) {
   if (c.type === 'playlist') {
     const p = S.playlist(c.id);
-    return p && { href: `#/playlist/${p.id}`, title: p.title, cover: playlistCover(p), key: reg(p.tracks, c) };
+    return p && { href: `#/playlist/${p.id}`, title: p.title, cover: playlistCover(p), key: p.tracks.length ? reg(p.tracks, c) : '' };
   }
   if (c.type === 'mix') {
     const m = A.getMix(c.id);
@@ -206,7 +206,7 @@ export function searchResults(q) {
   if (r.playlists.length) {
     parts.push(shelf('Playlists', r.playlists.map((id) => {
       const p = S.playlist(id);
-      return collCard({ href: `#/playlist/${p.id}`, title: p.title, sub: `${p.tracks.length} Tracks`, cover: playlistCover(p), key: reg(p.tracks, { type: 'playlist', id: p.id, title: p.title }) });
+      return collCard({ href: `#/playlist/${p.id}`, title: p.title, sub: `${p.tracks.length} Tracks`, cover: playlistCover(p), key: p.tracks.length ? reg(p.tracks, { type: 'playlist', id: p.id, title: p.title }) : '' });
     }), { key: 's-pl' }));
   }
   if (parts.length === 1 && !looksResolvable(q)) parts.push(empty('search'));
@@ -307,7 +307,7 @@ export function library(tab = 'likes', params) {
   } else if (tab === 'playlists') {
     const cards = [`<article class="card coll new" data-act="new-playlist"><div class="cv"><div class="fill">${icon('plus')}</div></div><div class="card-t">Neu</div></article>`];
     if (S.likes.length) cards.push(collCard({ href: '#/library/likes', title: 'Likes', sub: `${S.likes.length} Tracks`, cover: likesCover(), key: reg(S.likes.map((l) => l.id), { type: 'likes', id: 'likes', title: 'Likes' }) }));
-    S.playlists.forEach((p) => cards.push(collCard({ href: `#/playlist/${p.id}`, title: p.title, sub: `${p.tracks.length} Tracks`, cover: playlistCover(p), key: reg(p.tracks, { type: 'playlist', id: p.id, title: p.title }) })));
+    S.playlists.forEach((p) => cards.push(collCard({ href: `#/playlist/${p.id}`, title: p.title, sub: `${p.tracks.length} Tracks`, cover: playlistCover(p), key: p.tracks.length ? reg(p.tracks, { type: 'playlist', id: p.id, title: p.title }) : '' })));
     body = `<div class="grid">${cards.join('')}</div>`;
   } else if (tab === 'artists') {
     const ids = [...new Set([...S.follows.map((f) => f.id), ...A.topArtists(60)])].filter((u) => S.users[u]);
@@ -408,7 +408,7 @@ export function playlist(id) {
       title: p.title,
       sub: `${owner ? `<a href="#/artist/${owner.id}">${esc(owner.name)}</a> · ` : ''}${metaOf(p.tracks)}`,
       cover: playlistCover(p),
-      coverExtra: `<button class="c-edit" data-act="cover-edit" data-pid="${p.id}" aria-label="Cover bearbeiten">${icon('pencil')}</button>`,
+      coverExtra: `<button class="c-edit" data-act="cover-edit" data-pid="${p.id}" aria-label="Cover bearbeiten"><span class="c-edit-i">${icon('pencil')}</span></button>`,
       ids: p.tracks,
       ctx,
       extra,

@@ -69,7 +69,6 @@ export async function initCovers() {
       if (k?.startsWith(LS) && !urls.has(k.slice(LS.length))) urls.set(k.slice(LS.length), localStorage.getItem(k));
     }
   } catch {}
-  if (urls.size) S.emit('library');
 }
 
 export async function setCover(pid, blob) {
