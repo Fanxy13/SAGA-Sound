@@ -1,38 +1,10 @@
 // Custom playlist covers. Images live in IndexedDB (localStorage as a fallback)
 // and are rendered through object URLs, so the regular store stays small.
 import { S } from './store.js';
+import { idbAll, idbPut, idbDel, idbClear } from './idb.js';
 
-const DB_NAME = 'sagasound';
-const STORE = 'covers';
 const LS = 'sagasound:cover:';
 const urls = new Map();
-let dbPromise = null;
-
-function db() {
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      if (!('indexedDB' in window)) return reject(new Error('no-idb'));
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-      req.onblocked = () => reject(new Error('idb-blocked'));
-    });
-  }
-  return dbPromise;
-}
-
-async function tx(mode, fn) {
-  const d = await db();
-  return new Promise((resolve, reject) => {
-    const t = d.transaction(STORE, mode);
-    let result;
-    fn(t.objectStore(STORE), (v) => (result = v));
-    t.oncomplete = () => resolve(result);
-    t.onerror = () => reject(t.error);
-    t.onabort = () => reject(t.error);
-  });
-}
 
 const blobToDataUrl = (blob) =>
   new Promise((resolve, reject) => {
@@ -52,16 +24,7 @@ export const coverUrl = (pid) => urls.get(pid) || '';
 
 export async function initCovers() {
   try {
-    const entries = await tx('readonly', (st, done) => {
-      const out = [];
-      st.openCursor().onsuccess = (e) => {
-        const c = e.target.result;
-        if (!c) return done(out);
-        out.push([c.key, c.value]);
-        c.continue();
-      };
-    });
-    for (const [pid, blob] of entries || []) if (blob instanceof Blob) urls.set(pid, URL.createObjectURL(blob));
+    for (const [pid, blob] of await idbAll('covers')) if (blob instanceof Blob) urls.set(pid, URL.createObjectURL(blob));
   } catch {}
   try {
     for (let i = 0; i < localStorage.length; i++) {
@@ -73,7 +36,7 @@ export async function initCovers() {
 
 export async function setCover(pid, blob) {
   try {
-    await tx('readwrite', (st) => st.put(blob, pid));
+    await idbPut('covers', pid, blob);
   } catch {
     localStorage.setItem(LS + pid, await blobToDataUrl(blob));
   }
@@ -84,7 +47,7 @@ export async function setCover(pid, blob) {
 
 export async function removeCover(pid) {
   try {
-    await tx('readwrite', (st) => st.delete(pid));
+    await idbDel('covers', pid);
   } catch {}
   try {
     localStorage.removeItem(LS + pid);
@@ -95,7 +58,7 @@ export async function removeCover(pid) {
 
 export async function clearCovers() {
   try {
-    await tx('readwrite', (st) => st.clear());
+    await idbClear('covers');
   } catch {}
   try {
     Object.keys(localStorage)

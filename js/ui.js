@@ -3,6 +3,7 @@ import { S } from './store.js';
 import { icon } from './icons.js';
 import { genreOf } from './algo.js';
 import { coverUrl } from './covers.js';
+import { fileArt } from './files.js';
 import { art, esc, fmtTime, gradientFor, initials } from './util.js';
 
 // Every rendered list registers its track ids + play context under a short key,
@@ -30,7 +31,7 @@ export function logo(size = 28) {
 
 export const wordmark = () => `<span class="wm"><b>Saga</b>Sound</span>`;
 
-export const trackArt = (t) => t?.art || S.users[t?.uid]?.avatar || '';
+export const trackArt = (t) => (t?.id < 0 ? fileArt(t.id) : t?.art) || S.users[t?.uid]?.avatar || '';
 
 export function img(src, size = 't300x300', cls = '') {
   if (!src) return '';

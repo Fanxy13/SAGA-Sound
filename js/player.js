@@ -1,11 +1,23 @@
-// Playback controller. Audio runs through the official SoundCloud widget (hidden iframe);
-// SagaSound owns the queue, shuffle, repeat, endless radio and listening history.
+// Playback controller. SagaSound owns the queue, shuffle, repeat, endless radio and history;
+// the sound comes from one of two engines:
+//  - 'sc':   the official SoundCloud widget (hidden iframe)
+//  - 'file': a plain <audio> element for imported files
+//
+// Background tabs: browsers refuse to start a freshly loaded widget document while the tab is
+// hidden, and the widget reloads its iframe for every load(). So SoundCloud tracks are played
+// inside a SoundCloud collection that contains them (likes, uploads, playlists, discovery
+// sources). Later tracks from the same collection switch with skip() inside the same document,
+// which keeps working in the background. If the next queued track lives elsewhere while the tab
+// is hidden, playback continues inside the current collection instead of stopping.
 import { S } from './store.js';
 import { Widget, apiUrl } from './sc.js';
-import { radio } from './algo.js';
+import { radio, pick } from './algo.js';
+import { fileUrl, fileArt, isLocal } from './files.js';
 import { art, clamp, debounce, shuffled } from './util.js';
 
 const w = new Widget('player', 'sc-player');
+const au = new Audio();
+au.preload = 'auto';
 
 export const P = {
   queue: [],
@@ -32,6 +44,11 @@ const fire = (evt, data) => subs[evt]?.forEach((fn) => fn(P, data));
 export const currentId = () => P.queue[P.index];
 export const current = () => S.tracks[currentId()];
 
+let active = null; // engine of the current track
+let doc = null; // what the widget iframe holds: { key, url, ids }
+let docPlayed = false; // the widget document has played audio (needed to switch tracks in a hidden tab)
+let expect = null; // track the widget should be playing; checked on the next PLAY
+const single = new Set(); // tracks whose collection index turned out wrong: load them on their own
 let loadedId = null;
 let wantPlay = false;
 let listened = 0;
@@ -40,68 +57,279 @@ let started = false;
 let errors = 0;
 let pendingSeek = 0;
 let guard = null;
+let primed = false;
+let silentUrl = '';
 
-// ---------- widget events ----------
+const hidden = () => document.visibilityState === 'hidden';
+// Chromium and WebKit hold back new players in hidden tabs; Firefox does not, so it keeps the queue order.
+const bgDefers = !/Firefox\//.test(navigator.userAgent);
 
-w.on('PLAY', () => {
+// ---------- shared event handling ----------
+
+function onPlay(src) {
+  if (src !== active) return;
+  if (src === 'sc') docPlayed = true;
   P.playing = true;
   P.loading = false;
   P.blocked = false;
   errors = 0;
   clearTimeout(guard);
   if (pendingSeek) {
-    w.call('seekTo', pendingSeek);
+    seekEngine(pendingSeek);
     pendingSeek = 0;
   }
+  if (src === 'sc' && expect != null) verify(expect);
   fire('state');
   media();
-});
+}
 
-w.on('PAUSE', () => {
-  if (P.loading) return;
+function onPause(src) {
+  if (src !== active || P.loading) return;
   P.playing = false;
   fire('state');
   media();
-});
+}
 
-w.on('PLAY_PROGRESS', (e) => {
-  if (P.loading || !loadedId) return;
-  const pos = e.currentPosition || 0;
+function onProgress(src, pos, rel, buf) {
+  if (src !== active || P.loading || !loadedId) return;
   const d = pos - lastPos;
   if (d > 0 && d < 3000) listened += d;
   lastPos = pos;
   P.pos = pos;
-  const lp = e.loadProgress ?? e.loadedProgress;
-  if (lp != null) P.buf = lp;
-  if (!P.dur && e.relativePosition > 0.01) P.dur = pos / e.relativePosition;
+  if (buf != null) P.buf = buf;
+  if (!P.dur && rel > 0.01) P.dur = pos / rel;
   fire('progress');
-});
+}
 
+function onFinish(src) {
+  if (src !== active || P.loading || !loadedId) return;
+  commit(true);
+  if (P.repeat === 'one') restart();
+  else advance(false);
+}
+
+// widget
+w.on('PLAY', () => onPlay('sc'));
+w.on('PAUSE', () => onPause('sc'));
+w.on('PLAY_PROGRESS', (e) => onProgress('sc', e.currentPosition || 0, e.relativePosition || 0, e.loadProgress ?? e.loadedProgress));
 w.on('LOAD_PROGRESS', (e) => {
   const lp = e.loadProgress ?? e.loadedProgress;
-  if (lp != null) {
+  if (active === 'sc' && lp != null) {
     P.buf = lp;
     fire('progress');
   }
 });
-
 w.on('SEEK', (e) => {
-  if (P.loading) return;
+  if (active !== 'sc' || P.loading) return;
   P.pos = e.currentPosition ?? P.pos;
   lastPos = P.pos;
   fire('progress');
 });
+w.on('FINISH', () => onFinish('sc'));
+w.on('ERROR', () => active === 'sc' && !P.loading && failed());
 
-w.on('FINISH', () => {
-  if (P.loading || !loadedId) return;
-  commit(true);
-  if (P.repeat === 'one') restart();
-  else next(false);
+// <audio>
+const buffered = () => {
+  try {
+    return au.duration ? au.buffered.end(au.buffered.length - 1) / au.duration : 0;
+  } catch {
+    return 0;
+  }
+};
+au.addEventListener('playing', () => onPlay('file'));
+au.addEventListener('pause', () => !au.ended && onPause('file'));
+au.addEventListener('timeupdate', () => onProgress('file', au.currentTime * 1000, au.duration ? au.currentTime / au.duration : 0, buffered()));
+au.addEventListener('ended', () => onFinish('file'));
+au.addEventListener('durationchange', () => {
+  if (active === 'file' && Number.isFinite(au.duration) && au.duration > 0) {
+    P.dur = au.duration * 1000;
+    fire('progress');
+  }
+});
+au.addEventListener('error', () => {
+  if (active === 'file' && au.src && au.src !== silentUrl && !P.loading) failed();
 });
 
-w.on('ERROR', () => {
-  if (!P.loading) failed();
-});
+// ---------- engines ----------
+
+function seekEngine(ms) {
+  if (active === 'file') au.currentTime = ms / 1000;
+  else w.call('seekTo', ms);
+}
+
+function volumeEngine() {
+  const v = P.muted ? 0 : P.vol;
+  w.call('setVolume', v);
+  au.volume = v / 100;
+}
+
+// Imported files play through the page's own <audio>. Browsers only let a hidden tab start that
+// element if it has played before, so it plays a moment of silence on the first user action.
+function prime() {
+  if (primed || active === 'file' || !S.hasFiles()) return;
+  primed = true;
+  try {
+    if (!silentUrl) silentUrl = URL.createObjectURL(silentWav());
+    au.src = silentUrl;
+    au.play()?.then(() => au.pause(), () => {});
+  } catch {}
+}
+
+function silentWav() {
+  const n = 800;
+  const b = new DataView(new ArrayBuffer(44 + n));
+  const str = (o, s) => [...s].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF');
+  b.setUint32(4, 36 + n, true);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  b.setUint32(16, 16, true);
+  b.setUint16(20, 1, true);
+  b.setUint16(22, 1, true);
+  b.setUint32(24, 8000, true);
+  b.setUint32(28, 8000, true);
+  b.setUint16(32, 1, true);
+  b.setUint16(34, 8, true);
+  str(36, 'data');
+  b.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) b.setUint8(44 + i, 128);
+  return new Blob([b.buffer], { type: 'audio/wav' });
+}
+
+// ---------- SoundCloud collections ----------
+
+let hosts = null;
+let hostsV = -1;
+
+// track id -> collections that contain it, with the position the widget will show it at
+function hostIndex() {
+  if (hosts && hostsV === S.v) return hosts;
+  const m = new Map();
+  const add = (key, url, ids) => {
+    if (!ids || ids.length < 2) return;
+    ids.forEach((id, idx) => {
+      if (!(id > 0)) return;
+      let list = m.get(id);
+      if (!list) m.set(id, (list = []));
+      list.push({ key, url, ids, idx });
+    });
+  };
+  for (const [key, src] of Object.entries(S.sources)) {
+    const [kind, uid, what] = key.split(':');
+    if (kind === 'u' && src.ok !== false) add(key, apiUrl('user', uid) + (what === 'likes' ? '/favorites' : ''), src.ids);
+  }
+  for (const p of S.playlists) if (p.kind === 'sc' && p.sc) add(`p:${p.sc}`, apiUrl('playlist', p.sc), p.tracks);
+  hosts = m;
+  hostsV = S.v;
+  return m;
+}
+
+function ctxHostKey() {
+  const c = P.ctx;
+  if (!c) return '';
+  if (c.type === 'likes') return `u:${S.me?.id}:likes`;
+  if (c.type === 'uploads') return `u:${S.me?.id}:tracks`;
+  if (c.type === 'artist' || c.type === 'artist-new') return `u:${c.id}:tracks`;
+  if (c.type === 'artist-likes') return `u:${c.id}:likes`;
+  if (c.type === 'playlist') {
+    const p = S.playlist(c.id);
+    return p?.kind === 'sc' ? `p:${p.sc}` : '';
+  }
+  return '';
+}
+
+// The collection that fits best: the playing context first, then the one that also holds most
+// of the upcoming queue, then the one with the most music after this track.
+function pickHost(id) {
+  if (single.has(id)) return null;
+  const list = hostIndex().get(id);
+  if (!list?.length) return null;
+  const upcoming = P.queue.slice(P.index + 1, P.index + 16);
+  const ck = ctxHostKey();
+  let best = null;
+  let bestScore = -Infinity;
+  for (const h of list) {
+    const set = new Set(h.ids);
+    const overlap = upcoming.reduce((n, x) => n + (set.has(x) ? 1 : 0), 0);
+    const score = (h.key === ck ? 1000 : 0) + overlap * 10 + Math.min(h.ids.length - h.idx - 1, 30);
+    if (score > bestScore) {
+      bestScore = score;
+      best = h;
+    }
+  }
+  return best;
+}
+
+// Next track to play from the collection the widget already holds (background continuation).
+function continuation() {
+  if (!doc || doc.ids.length < 2) return null;
+  const cur = Math.max(0, doc.ids.indexOf(loadedId));
+  const avoid = new Set([...S.recentTracks(80), ...P.queue.slice(Math.max(0, P.index - 100), P.index + 1)]);
+  const cands = [];
+  for (let k = 1; k < doc.ids.length && cands.length < 25; k++) {
+    const id = doc.ids[(cur + k) % doc.ids.length];
+    const t = S.tracks[id];
+    if (id != null && !avoid.has(id) && !t?.bad && t?.policy !== 'BLOCK') cands.push(id);
+  }
+  if (!cands.length) return null;
+  return pick(cands, 1, { perArtist: 1 })[0] ?? cands[0];
+}
+
+// Make sure the widget plays the planned sound; its list can differ from what the scout saw.
+async function verify(id) {
+  expect = null;
+  const s = await w.get('getCurrentSound').catch(() => null);
+  if (currentId() !== id || active !== 'sc' || !s?.id) return;
+  if (s.id === id) {
+    S.ingest([s]);
+    if (S.tracks[id]?.dur) P.dur = S.tracks[id].dur;
+    fire('track');
+    media();
+    w.get('getDuration')
+      .then((d) => {
+        if (currentId() === id && d > 0) {
+          P.dur = d;
+          fire('progress');
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  const list = await w.get('getSounds').catch(() => null);
+  if (currentId() !== id) return;
+  const k = Array.isArray(list) ? list.findIndex((x) => x?.id === id) : -1;
+  if (k >= 0 && doc) {
+    doc.ids = list.map((x) => x?.id);
+    expect = id;
+    w.call('skip', k);
+    w.call('play');
+    return;
+  }
+  if (hidden()) {
+    // Can't reload in the background: keep what is playing and show it.
+    S.ingest([s]);
+    P.queue.splice(P.index, 0, s.id);
+    loadedId = s.id;
+    fire('track');
+    fire('queue');
+    return;
+  }
+  single.add(id);
+  start(P.index, 0);
+}
+
+function armGuard(id) {
+  clearTimeout(guard);
+  // Some browsers (mostly iOS) refuse to start audio in an iframe without a tap inside it.
+  guard = setTimeout(async () => {
+    if (currentId() !== id || P.playing || !wantPlay || active !== 'sc' || hidden()) return;
+    const paused = await w.get('isPaused').catch(() => true);
+    if (paused && currentId() === id && !P.playing && !hidden()) {
+      P.blocked = true;
+      fire('state');
+    }
+  }, 4500);
+}
 
 // ---------- history ----------
 
@@ -141,43 +369,77 @@ async function start(i, pos = 0) {
   fire('queue');
   persist();
   media();
+  if (isLocal(id)) return startFile(id);
+  return startSC(id);
+}
+
+async function startFile(id) {
+  active = 'file';
+  expect = null;
+  w.call('pause');
+  const url = await fileUrl(id);
+  if (currentId() !== id || active !== 'file') return;
+  if (!url) return failed();
+  au.src = url;
+  volumeEngine();
+  if (pendingSeek) {
+    au.currentTime = pendingSeek / 1000;
+    pendingSeek = 0;
+  }
+  loadedId = id;
+  started = true;
   try {
-    await w.load(apiUrl('track', id), { auto_play: true });
+    await au.play();
+  } catch (e) {
+    if (currentId() !== id || active !== 'file' || e?.name === 'AbortError') return;
+    if (e?.name === 'NotAllowedError') {
+      P.loading = false;
+      P.playing = false;
+      return fire('state');
+    }
+    failed();
+  }
+}
+
+async function startSC(id) {
+  if (active === 'file') au.pause();
+  active = 'sc';
+  const k = doc ? doc.ids.indexOf(id) : -1;
+  if (k >= 0) {
+    // Same widget document: no reload, so this also works while the tab is in the background.
+    expect = id;
+    loadedId = id;
+    started = true;
+    volumeEngine();
+    w.call('skip', k);
+    w.call('play');
+    armGuard(id);
+    return;
+  }
+  const h = pickHost(id);
+  const url = h ? h.url : apiUrl('track', id);
+  expect = id;
+  doc = null;
+  try {
+    await w.load(url, h ? { auto_play: true, start_track: h.idx } : { auto_play: true });
   } catch (e) {
     if (e.message === 'superseded' || currentId() !== id) return;
     return failed();
   }
-  if (currentId() !== id) return;
+  if (currentId() !== id || active !== 'sc') return;
+  doc = { key: h ? h.key : `t:${id}`, url, ids: h ? h.ids.slice() : [id] };
+  docPlayed = false;
   loadedId = id;
   started = true;
-  P.loading = false;
-  w.call('setVolume', P.muted ? 0 : P.vol);
-  w.get('getCurrentSound')
-    .then((s) => {
-      if (s?.id !== id) return;
-      S.ingest([s]);
-      if (S.tracks[id]?.dur) P.dur = S.tracks[id].dur;
-      fire('track');
-      media();
-    })
-    .catch(() => {});
-  w.get('getDuration')
-    .then((d) => {
-      if (currentId() === id && d > 0) {
-        P.dur = d;
-        fire('progress');
-      }
-    })
-    .catch(() => {});
-  // Some browsers (mostly iOS) refuse to start audio in an iframe without a tap inside it.
-  guard = setTimeout(async () => {
-    if (currentId() !== id || P.playing || !wantPlay) return;
-    const paused = await w.get('isPaused').catch(() => true);
-    if (paused && currentId() === id && !P.playing) {
-      P.blocked = true;
-      fire('state');
+  volumeEngine();
+  if (h) {
+    const idx = await w.get('getCurrentSoundIndex').catch(() => h.idx);
+    if (currentId() === id && idx !== h.idx) {
+      w.call('skip', h.idx);
+      w.call('play');
     }
-  }, 4000);
+  }
+  armGuard(id);
   fire('state');
 }
 
@@ -194,7 +456,7 @@ function failed() {
     return;
   }
   setTimeout(() => {
-    if (currentId() === id) next(false);
+    if (currentId() === id) advance(false);
   }, 900);
 }
 
@@ -202,8 +464,42 @@ function restart() {
   listened = 0;
   lastPos = 0;
   started = true;
-  w.call('seekTo', 0);
-  w.call('play');
+  if (active === 'file') {
+    au.currentTime = 0;
+    au.play().catch(() => {});
+  } else {
+    w.call('seekTo', 0);
+    w.call('play');
+  }
+}
+
+function advance(user) {
+  let i = P.index + 1;
+  if (i >= P.queue.length) {
+    if (P.repeat === 'all' && P.queue.length) i = 0;
+    else if (P.autoplay && P.queue.length) {
+      const exclude = new Set([...P.queue.slice(-300), ...S.recentTracks(40)]);
+      const more = radio(currentId(), 15, exclude);
+      P.queue.push(...more);
+      P.original?.push(...more);
+    }
+  }
+  const nextId = P.queue[i];
+  if (nextId == null) {
+    if (!user) {
+      P.playing = false;
+      fire('state');
+    }
+    return;
+  }
+  if (bgDefers && hidden() && !isLocal(nextId) && doc && docPlayed && !doc.ids.includes(nextId)) {
+    const cont = continuation();
+    if (cont != null) {
+      P.queue.splice(P.index + 1, 0, cont);
+      return start(P.index + 1);
+    }
+  }
+  start(i);
 }
 
 // ---------- public controls ----------
@@ -223,6 +519,7 @@ export function playList(ids, startAt = 0, ctx = null) {
   }
   P.ctx = ctx;
   S.touchContext(ctx);
+  prime();
   start(i);
 }
 
@@ -233,34 +530,23 @@ export function shufflePlay(ids, ctx) {
 
 export function toggle() {
   if (P.index < 0 || !P.queue.length) return;
+  prime();
   if (!loadedId && !P.loading) return start(P.index, P.pos);
   if (P.loading) return;
   if (P.playing) {
     wantPlay = false;
-    w.call('pause');
+    if (active === 'file') au.pause();
+    else w.call('pause');
   } else {
     wantPlay = true;
-    w.call('play');
+    if (active === 'file') au.play().catch(() => {});
+    else w.call('play');
   }
 }
 
 export function next(user = true) {
   if (user) commit(false, true);
-  if (P.index < P.queue.length - 1) return start(P.index + 1);
-  if (P.repeat === 'all' && P.queue.length) return start(0);
-  if (P.autoplay && P.queue.length) {
-    const exclude = new Set([...P.queue.slice(-300), ...S.recentTracks(40)]);
-    const more = radio(currentId(), 15, exclude);
-    if (more.length) {
-      P.queue.push(...more);
-      if (P.original) P.original.push(...more);
-      return start(P.index + 1);
-    }
-  }
-  if (!user) {
-    P.playing = false;
-    fire('state');
-  }
+  advance(user);
 }
 
 export function prev() {
@@ -281,7 +567,7 @@ export function seek(ms) {
   ms = Math.max(0, P.dur ? Math.min(ms, P.dur - 500) : ms);
   P.pos = ms;
   lastPos = ms;
-  if (loadedId) w.call('seekTo', ms);
+  if (loadedId) seekEngine(ms);
   else pendingSeek = ms;
   fire('progress');
   persist();
@@ -292,14 +578,14 @@ export const seekBy = (d) => seek(P.pos + d);
 export function setVolume(v) {
   P.vol = clamp(Math.round(v), 0, 100);
   P.muted = false;
-  w.call('setVolume', P.vol);
+  volumeEngine();
   S.setPref('volume', P.vol);
   fire('state');
 }
 
 export function toggleMute() {
   P.muted = !P.muted;
-  w.call('setVolume', P.muted ? 0 : P.vol);
+  volumeEngine();
   fire('state');
 }
 
@@ -361,6 +647,26 @@ export function removeAt(i) {
   persist();
 }
 
+// Drops a track everywhere in the queue (e.g. a deleted file).
+export function forget(id) {
+  if (currentId() === id) {
+    if (active === 'file') au.pause();
+    if (P.index < P.queue.length - 1) next(false);
+    else {
+      P.playing = false;
+      loadedId = null;
+    }
+  }
+  const cur = currentId();
+  P.queue = P.queue.filter((x) => x !== id);
+  P.original = P.original?.filter((x) => x !== id) || null;
+  P.index = Math.max(-1, P.queue.indexOf(cur));
+  fire('queue');
+  fire('track');
+  fire('state');
+  persist();
+}
+
 export function clearUpcoming() {
   P.queue.length = P.index + 1;
   P.original = null;
@@ -401,11 +707,12 @@ function media() {
   const t = current();
   if (!('mediaSession' in navigator) || !t) return;
   try {
+    const cover = isLocal(t.id) ? fileArt(t.id) : t.art ? art(t.art, 't500x500') : '';
     navigator.mediaSession.metadata = new MediaMetadata({
       title: t.title || '',
       artist: S.users[t.uid]?.name || '',
       album: P.ctx?.title || 'SagaSound',
-      artwork: t.art ? [{ src: art(t.art, 't500x500'), sizes: '500x500', type: 'image/jpeg' }] : [],
+      artwork: cover ? [{ src: cover, sizes: '512x512' }] : [],
     });
     navigator.mediaSession.playbackState = P.playing ? 'playing' : 'paused';
   } catch {}

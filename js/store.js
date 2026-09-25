@@ -5,7 +5,7 @@ const MAX_TRACKS = 7000;
 const MAX_HISTORY = 2500;
 
 const PARTS = {
-  core: ['me', 'likes', 'hidden', 'follows', 'playlists', 'seeds', 'prefs', 'synced', 'recent'],
+  core: ['me', 'likes', 'hidden', 'follows', 'playlists', 'seeds', 'prefs', 'synced', 'recent', 'files'],
   catalog: ['tracks', 'users'],
   history: ['history'],
   sources: ['sources'],
@@ -22,6 +22,7 @@ const blank = () => ({
   prefs: { volume: 80, shuffle: false, repeat: 'off', autoplay: true },
   synced: 0,
   recent: [], // recently played contexts
+  files: [], // imported audio files [{id, at}], newest first (ids are negative)
   tracks: {},
   users: {},
   history: [], // [{id, at, ms, done, skip}], newest first
@@ -96,6 +97,37 @@ export const S = {
     S.likes.forEach((l) => want.add(l.id));
     S.playlists.forEach((p) => p.tracks.forEach((id) => want.add(id)));
     return [...want].filter((id) => !S.tracks[id]?.ok);
+  },
+
+  // ---------- imported files ----------
+  hasFiles: () => S.files.length > 0,
+
+  addLocalTrack(t) {
+    S.tracks[t.id] = { ...t, seen: Date.now() };
+    S.files = [{ id: t.id, at: Date.now() }, ...S.files.filter((f) => f.id !== t.id)];
+    S.touch('core', 'catalog');
+  },
+
+  updateLocalTrack(id, { title, artist, uid }) {
+    const t = S.tracks[id];
+    if (!t) return;
+    if (title) t.title = title;
+    if (uid) {
+      S.addUser({ id: uid, name: artist, slug: '', avatar: '', url: '', local: true });
+      t.uid = uid;
+    }
+    S.touch('catalog');
+    S.emit('library');
+  },
+
+  removeLocalTrack(id) {
+    delete S.tracks[id];
+    S.files = S.files.filter((f) => f.id !== id);
+    S.likes = S.likes.filter((l) => l.id !== id);
+    S.playlists.forEach((p) => (p.tracks = p.tracks.filter((x) => x !== id)));
+    S.history = S.history.filter((h) => h.id !== id);
+    S.touch('core', 'catalog', 'history');
+    S.emit('library');
   },
 
   // ---------- likes ----------
@@ -287,11 +319,28 @@ export const S = {
   exportData() {
     const out = { app: 'sagasound', v: 1, at: Date.now() };
     for (const keys of Object.values(PARTS)) keys.forEach((k) => (out[k] = S[k]));
+    // Imported audio files live only in this browser, so they are left out of backups.
+    const local = (id) => Number(id) < 0;
+    out.files = [];
+    out.likes = S.likes.filter((l) => !local(l.id));
+    out.history = S.history.filter((h) => !local(h.id));
+    out.playlists = S.playlists.map((p) => ({ ...p, tracks: p.tracks.filter((id) => !local(id)) }));
+    out.tracks = Object.fromEntries(Object.entries(S.tracks).filter(([id]) => !local(id)));
+    out.users = Object.fromEntries(Object.entries(S.users).filter(([id]) => !local(id)));
+    const q = (S.session.queue || []).filter((id) => !local(id));
+    out.session = { ...S.session, queue: q, index: q.length ? Math.min(S.session.index, q.length - 1) : -1, pos: 0 };
     return out;
   },
 
   importData(data) {
     if (!data || data.app !== 'sagasound') throw new Error('invalid');
+    const local = (id) => Number(id) < 0;
+    const keep = {
+      tracks: Object.entries(S.tracks).filter(([id]) => local(id)),
+      users: Object.entries(S.users).filter(([id]) => local(id)),
+      files: S.files,
+      likes: S.likes.filter((l) => local(l.id)),
+    };
     const b = blank();
     for (const keys of Object.values(PARTS)) {
       keys.forEach((k) => {
@@ -299,6 +348,10 @@ export const S = {
       });
     }
     S.prefs = { ...b.prefs, ...S.prefs };
+    keep.tracks.forEach(([id, t]) => (S.tracks[id] = t));
+    keep.users.forEach(([id, u]) => (S.users[id] = u));
+    S.files = keep.files;
+    S.likes = [...keep.likes, ...S.likes.filter((l) => !local(l.id))];
     S.touch(...Object.keys(PARTS));
     flush();
     S.emit('*');
@@ -373,7 +426,7 @@ export function trackFrom(s) {
 function prune() {
   const ids = Object.keys(S.tracks);
   if (ids.length <= MAX_TRACKS) return;
-  const keep = new Set();
+  const keep = new Set(ids.filter((id) => Number(id) < 0));
   S.likes.forEach((l) => keep.add(String(l.id)));
   S.playlists.forEach((p) => p.tracks.forEach((id) => keep.add(String(id))));
   S.history.slice(0, 800).forEach((h) => keep.add(String(h.id)));
@@ -394,7 +447,9 @@ function write(part) {
   } catch {
     if (part !== 'catalog') return;
     // Storage full: drop the least recently seen half of the catalog and retry once.
-    const ids = Object.keys(S.tracks).sort((a, b) => (S.tracks[a].seen || 0) - (S.tracks[b].seen || 0));
+    const ids = Object.keys(S.tracks)
+      .filter((id) => Number(id) > 0)
+      .sort((a, b) => (S.tracks[a].seen || 0) - (S.tracks[b].seen || 0));
     ids.slice(0, Math.floor(ids.length / 2)).forEach((id) => delete S.tracks[id]);
     try {
       localStorage.setItem(NS + 'catalog', JSON.stringify({ tracks: S.tracks, users: S.users }));

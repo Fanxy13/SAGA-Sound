@@ -92,7 +92,7 @@ export async function discover() {
   set('discovering', true);
   let budget = 26;
   const round = async (uids, kinds) => {
-    for (const uid of uids) {
+    for (const uid of uids.filter((u) => u > 0)) {
       for (const kind of kinds) {
         const key = `u:${uid}:${kind}`;
         if (budget <= 0 || S.sourceAge(key) < SOURCE_TTL) continue;
@@ -119,6 +119,7 @@ const inflight = new Set();
 
 // Loads one artist's uploads and likes (for artist pages).
 export async function scoutArtist(uid, first = true) {
+  if (!(uid > 0)) return; // artists of imported files only exist locally
   const jobs = ['tracks', 'likes'].map(async (kind) => {
     const key = `u:${uid}:${kind}`;
     if (S.sourceAge(key) < SOURCE_TTL || inflight.has(key)) return;

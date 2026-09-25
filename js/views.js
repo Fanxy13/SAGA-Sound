@@ -283,6 +283,7 @@ export function library(tab = 'likes', params) {
   const tabs = [
     ['likes', 'Likes'],
     ['playlists', 'Playlists'],
+    ['files', 'Dateien'],
     ['artists', 'Künstler'],
     ['history', 'Verlauf'],
   ];
@@ -317,6 +318,14 @@ export function library(tab = 'likes', params) {
     const ids = hist.map((h) => h.id);
     const ctx = { type: 'history', id: 'history', title: 'Verlauf' };
     body = ids.length ? listBlock(ids, ctx, (_, i) => timeAgo(hist[i]?.at || Date.now())) : empty('history');
+  } else if (tab === 'files') {
+    const ids = S.files.map((f) => f.id).filter((id) => S.tracks[id]);
+    const ctx = { type: 'files', id: 'files', title: 'Dateien' };
+    const key = reg(ids, ctx);
+    const up = `<button class="ib lg" data-act="upload" aria-label="Dateien hochladen">${icon('upload')}</button>`;
+    body = ids.length
+      ? `<div class="lib-top">${actions(key, { extra: up })}<span class="count">${fmtCount(ids.length)}</span></div>${listBlock(ids, ctx)}`
+      : `<button class="drop" data-act="upload">${icon('upload')}<span>MP3 hochladen</span></button>`;
   } else if (tab === 'uploads') {
     const ids = S.sources[`u:${S.me?.id}:tracks`]?.ids || [];
     const ctx = { type: 'uploads', id: 'uploads', title: 'Uploads' };
@@ -327,7 +336,7 @@ export function library(tab = 'likes', params) {
   return {
     deps: ['library', 'catalog', 'history', 'me', '*'],
     html: `<div class="page lib">
-      <header class="page-h"><h1>Bibliothek</h1><button class="ib lg" data-act="add-link" aria-label="Link hinzufügen">${icon('plus')}</button></header>
+      <header class="page-h"><h1>Bibliothek</h1><div class="page-a"><button class="ib lg" data-act="upload" aria-label="Dateien hochladen">${icon('upload')}</button><button class="ib lg" data-act="add-link" aria-label="Link hinzufügen">${icon('plus')}</button></div></header>
       <nav class="chips">${tabs.map(([k, l]) => `<a class="chip${k === tab ? ' on' : ''}" href="#/library/${k}">${l}</a>`).join('')}</nav>
       ${body}
     </div>`,

@@ -7,6 +7,7 @@ import { radio } from './algo.js';
 import { loadApi } from './sc.js';
 import { initCovers, removeCover, clearCovers, exportCovers, importCovers } from './covers.js';
 import { openCoverEditor } from './cover-editor.js';
+import { initFiles, importFiles, deleteFile, clearFiles, peaksToSamples, isLocal, isAudioFile, artistIdFor } from './files.js';
 import { icon } from './icons.js';
 import { logo, wordmark, getList, trackArt, img, avatar, likesCover, playlistCover, markLoaded } from './ui.js';
 import { Wave, loadWave } from './wave.js';
@@ -106,7 +107,9 @@ document.body.insertAdjacentHTML(
   <div class="sc-host" id="sc-player"></div>
   <div class="sc-host" id="sc-scout"></div>
   <dialog class="dlg" id="dlg"></dialog>
-  <input type="file" id="file" accept="application/json,.json" hidden>`,
+  <input type="file" id="file" accept="application/json,.json" hidden>
+  <input type="file" id="audio-file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" multiple hidden>
+  <div class="dropover" aria-hidden="true"><div class="dropover-i">${icon('upload')}</div></div>`,
 );
 
 const main = $('#main');
@@ -250,10 +253,13 @@ function onTrack() {
     al.href = t ? `#/artist/${t.uid}` : '#/';
   }
   const sc = t?.url || u?.url || 'https://soundcloud.com';
-  $('#pb-sc').href = sc;
-  $('#np-sc').href = sc;
+  for (const el of [$('#pb-sc'), $('#np-sc')]) {
+    el.href = sc;
+    el.hidden = isLocal(id);
+  }
   $('#np-ctx').textContent = P.ctx?.title || '';
   $('.pb-art').style.background = gradientFor(id);
+  $('.np-art').style.background = gradientFor(id);
   likeState();
   if (id !== shownId) {
     shownId = id;
@@ -268,7 +274,12 @@ function onTrack() {
     });
     aura(a ? art(a, 't300x300') : '');
   }
-  if (t?.wave && t.wave !== shownWave) {
+  if (t?.peaks && shownWave !== 'peaks:' + id) {
+    shownWave = 'peaks:' + id;
+    const s = peaksToSamples(t.peaks);
+    pbWave.set(s);
+    npWave.set(s);
+  } else if (t?.wave && t.wave !== shownWave) {
     shownWave = t.wave;
     loadWave(t.wave).then((s) => {
       if (currentId() !== id) return;
@@ -499,6 +510,8 @@ function trackMenu(id, rowEl, at) {
       { icon: 'user', label: 'Künstler', run: () => go(`#/artist/${t.uid}`) },
       t.url && { icon: 'ext', label: 'SoundCloud', run: () => open(t.url, '_blank', 'noopener') },
       t.url && { icon: 'link', label: 'Link kopieren', run: () => copy(t.url) },
+      isLocal(id) && { icon: 'pencil', label: 'Bearbeiten', run: () => editLocal(id) },
+      isLocal(id) && { icon: 'trash', label: 'Datei löschen', danger: true, run: () => removeLocal(id) },
       pl?.kind === 'local' && { icon: 'trash', label: 'Entfernen', danger: true, run: () => S.removeFromPlaylist(pl.id, Number(rowEl.dataset.i)) },
     ],
     at,
@@ -657,6 +670,7 @@ $('#dlg').addEventListener('click', async (e) => {
       return;
     }
     await clearCovers();
+    await clearFiles();
     S.reset();
     location.hash = '#/';
     location.reload();
@@ -679,6 +693,99 @@ $('#file').addEventListener('change', async (e) => {
     toast('Ungültig', 'x');
   }
 });
+
+// ---------------- imported files ----------------
+
+async function runImport(files) {
+  const list = [...files];
+  if (!list.length) return;
+  toast(`0/${list.length}`, 'upload');
+  const { ids, skipped } = await importFiles(list, (i, n) => toast(`${Math.min(i + 1, n)}/${n}`, 'upload'));
+  if (ids.length) {
+    toast(ids.length === 1 ? '1 Song importiert' : `${ids.length} Songs importiert`, 'check');
+    go('#/library/files');
+  } else toast(skipped ? 'Format nicht unterstützt' : 'Keine Audiodatei', 'x');
+}
+
+$('#audio-file').addEventListener('change', (e) => {
+  const files = [...(e.target.files || [])];
+  e.target.value = '';
+  runImport(files);
+});
+
+{
+  let depth = 0;
+  const withFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files') && !$('#dlg').open;
+  const done = () => {
+    depth = 0;
+    document.body.classList.remove('dragging-files');
+  };
+  addEventListener('dragenter', (e) => {
+    if (!withFiles(e)) return;
+    depth++;
+    document.body.classList.add('dragging-files');
+  });
+  addEventListener('dragleave', (e) => {
+    if (!withFiles(e)) return;
+    depth = Math.max(0, depth - 1);
+    if (!depth) done();
+  });
+  addEventListener('dragover', (e) => withFiles(e) && e.preventDefault());
+  addEventListener('drop', (e) => {
+    if (!withFiles(e)) return;
+    e.preventDefault();
+    done();
+    runImport([...(e.dataTransfer.files || [])].filter(isAudioFile));
+  });
+}
+
+function editLocal(id) {
+  const t = S.tracks[id];
+  if (!t) return;
+  const d = $('#dlg');
+  d.className = 'dlg';
+  d.innerHTML = `<form class="ask">
+    <div class="ask-in">${icon('music')}<input data-f="title" value="${esc(t.title)}" placeholder="Titel" autocomplete="off" spellcheck="false"></div>
+    <div class="ask-in">${icon('user')}<input data-f="artist" value="${esc(S.users[t.uid]?.name || '')}" placeholder="Künstler" autocomplete="off" spellcheck="false"></div>
+    <div class="ask-a"><button type="button" class="pill ghost" data-close>Abbrechen</button><button class="pill solid">OK</button></div>
+  </form>`;
+  const f = d.querySelector('form');
+  f.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const title = f.querySelector('[data-f="title"]').value.trim();
+    const artist = f.querySelector('[data-f="artist"]').value.trim() || 'Unbekannt';
+    S.updateLocalTrack(id, { title: title || t.title, artist, uid: artistIdFor(artist) });
+    d.close();
+    onTrack();
+  });
+  d.showModal();
+  f.querySelector('input').focus();
+}
+
+function confirmDlg(label, ic = 'trash') {
+  const d = $('#dlg');
+  d.className = 'dlg';
+  d.innerHTML = `<form class="ask"><div class="ask-q">${icon(ic)}<span>${esc(label)}</span></div>
+    <div class="ask-a"><button type="button" class="pill ghost" data-close>Abbrechen</button><button class="pill solid danger">Löschen</button></div></form>`;
+  return new Promise((resolve) => {
+    let ok = false;
+    d.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      ok = true;
+      d.close();
+    });
+    d.addEventListener('close', () => resolve(ok), { once: true });
+    d.showModal();
+  });
+}
+
+async function removeLocal(id) {
+  const t = S.tracks[id];
+  if (!t || !(await confirmDlg(t.title))) return;
+  PL.forget(id);
+  await deleteFile(id);
+  toast('Gelöscht', 'trash');
+}
 
 function startRadio(id) {
   const t = S.tracks[id];
@@ -759,6 +866,7 @@ const ACT = {
   'new-playlist': () => newPlaylist(),
   'cover-edit': (el) => openCoverEditor(el.dataset.pid, { toast }),
   'add-link': addLinkDialog,
+  upload: () => $('#audio-file').click(),
   vibe(el) {
     const v = SY.VIBES.find((x) => x.id === el.dataset.vibe);
     if (!v) return;
@@ -917,7 +1025,7 @@ addEventListener('keydown', (e) => {
 }
 // Custom covers come from IndexedDB; wait briefly so the first paint already shows them.
 let coversReady = false;
-const coversLoaded = initCovers().then(() => (coversReady = true));
+const coversLoaded = Promise.all([initCovers(), initFiles()]).then(() => (coversReady = true));
 await Promise.race([coversLoaded, new Promise((r) => setTimeout(r, 600))]);
 const coversLate = !coversReady;
 renderSide();
