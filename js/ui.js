@@ -2,6 +2,7 @@
 import { S } from './store.js';
 import { icon } from './icons.js';
 import { genreOf } from './algo.js';
+import { coverUrl } from './covers.js';
 import { art, esc, fmtTime, gradientFor, initials } from './util.js';
 
 // Every rendered list registers its track ids + play context under a short key,
@@ -100,6 +101,8 @@ export function likesCover() {
 }
 
 export function playlistCover(p) {
+  const own = coverUrl(p.id);
+  if (own) return `<img class="ld" src="${esc(own)}" alt="" decoding="async">`;
   return (p.art ? img(p.art, 't500x500') : mosaic(p.tracks)) || `<div class="fill" style="background:${gradientFor(p.id)}">${icon('music')}</div>`;
 }
 

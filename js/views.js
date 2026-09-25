@@ -381,11 +381,11 @@ export function artist(uidStr) {
 
 // ---------------- collections ----------------
 
-function collPage({ kind, title, sub, cover, ids, ctx, extra = '', coverClass = '' }) {
+function collPage({ kind, title, sub, cover, ids, ctx, extra = '', coverClass = '', coverExtra = '' }) {
   const key = reg(ids, ctx);
   return `<div class="page coll-page">
     <header class="c-hero">
-      <div class="c-cv ${coverClass}">${cover}</div>
+      <div class="c-cv ${coverClass}">${cover}${coverExtra}</div>
       <div class="c-meta"><div class="c-k">${kind}</div><h1 class="fit">${esc(title)}</h1><div class="c-s">${sub}</div></div>
     </header>
     ${ids.length ? actions(key, { extra }) : `<div class="actions">${extra}</div>`}
@@ -408,6 +408,7 @@ export function playlist(id) {
       title: p.title,
       sub: `${owner ? `<a href="#/artist/${owner.id}">${esc(owner.name)}</a> · ` : ''}${metaOf(p.tracks)}`,
       cover: playlistCover(p),
+      coverExtra: `<button class="c-edit" data-act="cover-edit" data-pid="${p.id}" aria-label="Cover bearbeiten">${icon('pencil')}</button>`,
       ids: p.tracks,
       ctx,
       extra,

@@ -186,6 +186,14 @@ export const S = {
     S.emit('library');
   },
 
+  setPlaylistCover(pid, cover) {
+    const p = S.playlist(pid);
+    if (!p) return;
+    if (cover) p.cover = cover;
+    else delete p.cover;
+    S.touch('core');
+  },
+
   deletePlaylist(pid) {
     S.playlists = S.playlists.filter((p) => p.id !== pid);
     S.touch('core');

@@ -15,6 +15,7 @@ Lokal: `python3 -m http.server 8000` → <http://localhost:8000>.
 - **Wiedergabe:** offizielles [SoundCloud HTML5 Widget](https://developers.soundcloud.com/docs/api/html5-widget) als unsichtbarer Player, gesteuert über die Widget-API. Kein API-Key, kein Server.
 - **Profil & Links:** werden über SoundCloud-oEmbed aufgelöst (`soundcloud.com/name`, Track-, Playlist- und Künstler-Links).
 - **Daten:** Likes, Playlists, Verlauf und Cache liegen nur im Browser (`localStorage`). Backup/Import im Profil-Menü.
+- **Playlist-Cover:** Auf das Cover einer Playlist klicken (oder ⋯ → Cover): eigenes Bild hochladen, verschieben und zoomen oder ein Cover aus Farbverläufen gestalten, optional mit Titel. Die Bilder liegen in IndexedDB und sind im Backup enthalten.
 - **Empfehlungen:** laufen komplett lokal. Likes, Plays, Skips und gefolgte Künstler ergeben Affinitäten zu Künstlern, Genres und Tags. Kandidaten kommen aus den Uploads und Likes deiner Lieblingskünstler; die Liste wird nach Ähnlichkeit, Frische und Popularität gewichtet und so gemischt, dass sich Künstler nicht wiederholen. Daraus entstehen *Für dich*, *Saga Mix* (täglich neu), Genre-Mixes, *Weil du X hörst*, *Neu für dich*, *Wiederentdecken* und das endlose Radio am Ende der Warteschlange.
 
 ## Tastatur

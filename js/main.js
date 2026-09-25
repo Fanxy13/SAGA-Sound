@@ -5,6 +5,8 @@ import * as V from './views.js';
 import * as SY from './sync.js';
 import { radio } from './algo.js';
 import { loadApi } from './sc.js';
+import { initCovers, removeCover, clearCovers, exportCovers, importCovers } from './covers.js';
+import { openCoverEditor } from './cover-editor.js';
 import { icon } from './icons.js';
 import { logo, wordmark, getList, trackArt, img, avatar, likesCover, playlistCover, markLoaded } from './ui.js';
 import { Wave, loadWave } from './wave.js';
@@ -518,11 +520,12 @@ function playlistMenu(pid, at) {
   openMenu(
     [
       { icon: 'end', label: 'Zur Warteschlange', run: () => PL.enqueue(p.tracks) },
+      { icon: 'image', label: 'Cover', run: () => openCoverEditor(p.id, { toast }) },
       p.kind === 'local' && { icon: 'settings', label: 'Umbenennen', run: () => ask({ icon: 'queue', value: p.title }).then((v) => v && S.renamePlaylist(p.id, v)) },
       p.kind === 'sc' && { icon: 'sync', label: 'Aktualisieren', run: () => p.url && SY.addLink(p.url).then(() => toast(p.title, 'sync')) },
       p.url && { icon: 'ext', label: 'SoundCloud', run: () => open(p.url, '_blank', 'noopener') },
       '-',
-      { icon: 'trash', label: 'Löschen', danger: true, run: () => (S.deletePlaylist(p.id), go('#/library/playlists')) },
+      { icon: 'trash', label: 'Löschen', danger: true, run: () => (S.deletePlaylist(p.id), removeCover(p.id), go('#/library/playlists')) },
     ],
     at,
   );
@@ -622,7 +625,7 @@ function openSettings() {
 
 $('#dlg').addEventListener('click', async (e) => {
   const d = $('#dlg');
-  if (e.target === d || e.target.closest('[data-close]')) return d.close();
+  if ((e.target === d && !d.classList.contains('dragging')) || e.target.closest('[data-close]')) return d.close();
   const b = e.target.closest('[data-set]');
   if (!b) return;
   const k = b.dataset.set;
@@ -636,7 +639,9 @@ $('#dlg').addEventListener('click', async (e) => {
     d.close();
     render();
   } else if (k === 'export') {
-    const blob = new Blob([JSON.stringify(S.exportData())], { type: 'application/json' });
+    const data = S.exportData();
+    data.covers = await exportCovers();
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `sagasound-${new Date().toISOString().slice(0, 10)}.json`;
@@ -650,6 +655,7 @@ $('#dlg').addEventListener('click', async (e) => {
       b.querySelector('span').textContent = 'Sicher?';
       return;
     }
+    await clearCovers();
     S.reset();
     location.hash = '#/';
     location.reload();
@@ -661,7 +667,9 @@ $('#file').addEventListener('change', async (e) => {
   e.target.value = '';
   if (!f) return;
   try {
-    S.importData(JSON.parse(await f.text()));
+    const data = JSON.parse(await f.text());
+    S.importData(data);
+    await importCovers(data.covers);
     PL.restore();
     $('#dlg').close();
     render();
@@ -748,6 +756,7 @@ const ACT = {
     toast(on ? 'Folge ich' : 'Entfolgt', on ? 'following' : 'x');
   },
   'new-playlist': () => newPlaylist(),
+  'cover-edit': (el) => openCoverEditor(el.dataset.pid, { toast }),
   'add-link': addLinkDialog,
   vibe(el) {
     const v = SY.VIBES.find((x) => x.id === el.dataset.vibe);
@@ -905,6 +914,7 @@ addEventListener('keydown', (e) => {
   pbWave.colors(col);
   npWave.colors(col);
 }
+await Promise.race([initCovers(), new Promise((r) => setTimeout(r, 600))]);
 renderSide();
 renderMe();
 PL.restore();
